@@ -310,7 +310,7 @@
 (defun rspec-run (&optional opts)
   "Runs spec with the specified options"
   (rspec-register-verify-redo (cons 'rspec-run opts))
-  (compile (mapconcat 'identity (list (rspec-runner) (rspec-runner-target) (rspec-spec-directory rspec-project-root) (rspec-runner-options opts)) " "))
+  (compile (mapconcat 'identity (list (rspec-runner) (rspec-spec-directory rspec-project-root) (rspec-runner-options opts)) " "))
   (end-of-buffer-other-window 0))
 
 (defun rspec-run-single-file (spec-file &rest opts)
@@ -379,9 +379,47 @@ as the value of the symbol, and the hook as the function definition."
      old)))
 
 
+
+(defface rspec-failure-counter
+   '((((class color)) (:inherit 'compilation-error))
+     (t (:reverse-video t)))
+  "Face to use for highlighting rspec failure counter"
+  :group 'faces
+  :group 'rspec-mode)
+
+
+(defface rspec-failure-header
+   '((((class color)) (:background "red4" :foreground "white"))
+     (t (:reverse-video t)))
+  "Face to use for highlighting rspec failure header (line 1)"
+  :group 'faces
+  :group 'rspec-mode)
+
+
+(defface rspec-failure-message
+   '((((class color)) (:inherit 'compilation-error))
+     (t (:reverse-video t)))
+  "Face to use for highlighting rspec failure message (line 2)"
+  :group 'faces
+  :group 'rspec-mode)
+
+
 (add-to-list 'compilation-error-regexp-alist-alist 
-	     '(rspec "\\([0-9A-Za-z_./\:-]+\\.rb\\):\\([0-9]+\\)" 1 2))
+	     '(rspec-failure "\n\\([0-9]+)\\)\n\\(.*\n\\)\\(.*\n\\)\\(\\)" nil nil nil 1 4
+                         (1 'rspec-failure-counter)
+                         (2 'rspec-failure-header)
+                         (3 'rspec-failure-message)
+                         ))
+(add-to-list 'compilation-error-regexp-alist 'rspec-failure)
+
+(add-to-list 'compilation-error-regexp-alist-alist
+             '(rspec "\\(/[0-9A-Za-z_./\:-]+\\.rb:[0-9]+\\)\\(:\\(?:in `\\)?\\)\\(.*\\)?[']?\n" nil nil nil 0 1
+                     (1 'compilation-line-number)
+                     (2 'default t t)
+                     (3 'compilation-column-number t t)
+                     ))
 (add-to-list 'compilation-error-regexp-alist 'rspec)
+
 
 (provide 'rspec-mode)
 ;;; rspec-mode.el ends here
