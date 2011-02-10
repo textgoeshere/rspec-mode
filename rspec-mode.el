@@ -1,12 +1,13 @@
 ;;; rspec-mode.el --- Enhance ruby-mode for RSpec
 
 ;; Copyright (C) 2008 Peter Williams <http://pezra.barelyenough.org>
-;; Authors: Peter Williams, Tim Harper
+;; Authors: Peter Williams, et al.
 ;; URL: http://github.com/pezra/rspec-mode
 ;; Created: 2008
-;; Version: 0.2
+;; Version: 0.7
 ;; Keywords: rspec ruby
-;; Package-Requires: ((ruby-mode "1.1"))
+;; Package-Requires: ((ruby-mode "1.1")
+;;                    (mode-compile "2.29"))
 
 ;;; Commentary:
 ;;
@@ -63,11 +64,19 @@
 ;; ------------
 ;;
 ;; This minor mode depends on `mode-compile`.  The expectations depend
-;; `on el-expectataions.el`.
+;; `on el-expectataions.el`.  If `ansi-color` is available it will be
+;; loaded so that rspec output is colorized properly.  If
+;; `rspec-use-rvm` is set to true `rvm.el` is required.
 ;; 
 
 ;;; Change Log:
 ;;
+;; 1.0 - Advance to end of compilation buffer even if it not the other window (byplayer)
+;; 0.8 - RVM support (Peter Williams)
+;; 0.7 - follow RoR conventions for file in lib directory (Tim Harper)
+;; 0.6 - support for arbitrary spec and rake commands (David Yeu)
+;; 0.5 - minor changes from Tim Harper
+;; 0.4 - ansi colorization of compliation buffers (teaforthecat)
 ;; 0.3 - Dave Nolan implements respect for spec.opts config and
 ;;       custom option to use 'rake spec' task or 'spec' command
 ;; 0.2 - Tim Harper implemented support for imenu to generate a basic
@@ -97,6 +106,22 @@
                 (const :tag "Use 'spec' command" nil))
   :group 'rspec-mode)
 
+(defcustom rspec-rake-command "rake"
+  "The command for rake"
+  :type 'string
+  :group 'rspec-mode)
+
+(defcustom rspec-spec-command "spec"
+  "The command for spec"
+  :type 'string
+  :group 'rspec-mode)
+
+(defcustom rspec-use-rvm nil
+  "t when RVM in is in use. (Requires rvm.el)"
+  :type 'boolean
+  :group 'rspec-mode)
+
+
 ;;;###autoload
 (define-minor-mode rspec-mode
   "Minor mode for rSpec files"
@@ -108,12 +133,16 @@
   '(("Examples"  "^\\( *\\(it\\|describe\\|context\\) +.+\\)"          1))
   "The imenu regex to parse an outline of the rspec file")
 
+(defcustom rspec-compilation-buffer-name "*compilation*"
+  "The compilation buffer name for spec"
+  :type 'string
+  :group 'rspec-mode)
+
 (defun rspec-set-imenu-generic-expression ()
   (make-local-variable 'imenu-generic-expression)
   (make-local-variable 'imenu-create-index-function)
   (setq imenu-create-index-function 'imenu-default-create-index-function)
-  (setq imenu-generic-expression rspec-imenu-generic-expression)
-  (message (format "imenu-generic-expression is %s" imenu-generic-expression)))
+  (setq imenu-generic-expression rspec-imenu-generic-expression))
 
 (add-hook 'rspec-mode-hook 'rspec-set-imenu-generic-expression)
 
@@ -202,19 +231,35 @@
    (if (rspec-buffer-is-spec-p)
        (rspec-target-file-for (buffer-file-name))
      (rspec-spec-file-for (buffer-file-name)))))
+(defun rspec-spec-directory-has-lib? (a-file-name)
+  (file-directory-p (concat (rspec-spec-directory a-file-name) "/lib")))
+
 
 (defun rspec-spec-file-for (a-file-name)
   "Find spec for the specified file"
   (if (rspec-spec-file-p a-file-name)
       a-file-name
-    (rspec-specize-file-name (expand-file-name (replace-regexp-in-string "^\\.\\./[^/]+/" "" (file-relative-name a-file-name (rspec-spec-directory a-file-name))) 
-                                               (rspec-spec-directory a-file-name)))))
+    (let ((replace-regex (if (and (rspec-target-lib-file-p a-file-name) (rspec-spec-directory-has-lib? a-file-name))
+                             "^\\.\\./"
+                           "^\\.\\./[^/]+/"))
+          (relative-file-name (file-relative-name a-file-name (rspec-spec-directory a-file-name))))
+      (rspec-specize-file-name (expand-file-name (replace-regexp-in-string replace-regex "" relative-file-name)
+                                                 (rspec-spec-directory a-file-name))))))
+
+(defun rspec-spec-lib-file-p (a-spec-file-name)
+  (string-match (concat "^" (expand-file-name (regexp-quote (concat (rspec-spec-directory a-spec-file-name) "/lib")))) a-spec-file-name))
+
+(defun rspec-target-lib-file-p (a-file-name)
+  (string-match (concat "^" (expand-file-name (regexp-quote (concat (rspec-project-root a-file-name) "/lib")))) a-file-name))
 
 (defun rspec-target-file-for (a-spec-file-name)
   "Find the target for a-spec-file-name"
-  (first 
-   (file-expand-wildcards 
-    (replace-regexp-in-string "/spec/" "/*/" (rspec-targetize-file-name a-spec-file-name)))))
+  (first
+   (file-expand-wildcards
+        (replace-regexp-in-string
+         "/spec/"
+         (if (rspec-spec-lib-file-p a-spec-file-name) "/" "/*/")
+         (rspec-targetize-file-name a-spec-file-name)))))
 
 (defun rspec-specize-file-name (a-file-name)
   "Returns a-file-name but converted in to a spec file name"
@@ -277,13 +322,18 @@
 
 (defun rspec-runner ()
   "Returns command line to run rspec"
-  (if rspec-use-rake-flag "rake spec" "spec"))
+  (if rspec-use-rake-flag
+      (concat rspec-rake-command " spec")
+    rspec-spec-command))
 
 (defun rspec-runner-options (&optional opts)
   "Returns string of options for command line"
-  (concat (when rspec-use-rake-flag "SPEC_OPTS=\'")
-          (mapconcat 'identity opts " ")
-          (when rspec-use-rake-flag "\'")))
+  (let ((opts (if (listp opts)
+                  opts
+                (list opts))))
+    (concat (when rspec-use-rake-flag "SPEC_OPTS=\'")
+            (mapconcat 'identity opts " ")
+            (when rspec-use-rake-flag "\'"))))
 
 (defun rspec-runner-target (target)
   "Returns target file/directory wrapped in SPEC if using rake"
@@ -301,7 +351,22 @@
     (rspec-beginning-of-example)
     (re-search-forward "it[[:space:]]+['\"]\\(.*\\)['\"][[:space:]]*\\(do\\|DO\\|Do\\|{\\)")
     (match-string 1)))
-                    
+
+(defun rspec-end-of-buffer-target-window (buf-name)
+  "end of line target window"
+  (let ((cur-window (selected-window))
+        (com-buffer (get-buffer buf-name)))
+    (if com-buffer
+        (let ((com-window (get-buffer-window com-buffer)))
+          (cond (com-window
+                 (unwind-protect
+                     (progn
+                       (select-window com-window)
+                       (with-no-warnings
+                         (goto-char (point-max))
+                         (recenter '(t))))
+                   (select-window cur-window))))))))
+
 (defun rspec-register-verify-redo (redoer)
   "Register a bit of code that will repeat a verification process"
   (let ((redoer-cmd (eval (append '(lambda () (interactive)) (list redoer)))))
@@ -309,15 +374,19 @@
 
 (defun rspec-run (&optional opts)
   "Runs spec with the specified options"
+  (if rspec-use-rvm
+      (rvm-activate-corresponding-ruby))
   (rspec-register-verify-redo (cons 'rspec-run opts))
-  (compile (mapconcat 'identity (list (rspec-runner) (rspec-spec-directory rspec-project-root) (rspec-runner-options opts)) " "))
-  (end-of-buffer-other-window 0))
+  (compile (mapconcat 'identity (list (rspec-runner) (rspec-spec-directory (rspec-project-root)) (rspec-runner-options opts)) " "))
+  (rspec-end-of-buffer-target-window rspec-compilation-buffer-name))
 
 (defun rspec-run-single-file (spec-file &rest opts)
   "Runs spec on a file with the specified options"
+  (if rspec-use-rvm
+      (rvm-activate-corresponding-ruby))
   (rspec-register-verify-redo (cons 'rspec-run-single-file (cons spec-file opts)))
   (compile (mapconcat 'identity (list (rspec-runner) (rspec-runner-target spec-file) (rspec-runner-options opts)) " "))
-  (end-of-buffer-other-window 0))
+  (rspec-end-of-buffer-target-window rspec-compilation-buffer-name))
 
 (defun rspec-project-root (&optional directory)
   "Finds the root directory of the project by walking the directory tree until it finds a rake file."
@@ -420,6 +489,15 @@ as the value of the symbol, and the hook as the function definition."
                      ))
 (add-to-list 'compilation-error-regexp-alist 'rspec)
 
+(condition-case nil
+    (progn
+      (require 'ansi-color)
+      (defun rspec-colorize-compilation-buffer ()
+        (toggle-read-only)
+        (ansi-color-apply-on-region (point-min) (point-max))
+        (toggle-read-only))
+      (add-hook 'compilation-filter-hook 'rspec-colorize-compilation-buffer))
+    (error nil))
 
 (provide 'rspec-mode)
 ;;; rspec-mode.el ends here
